@@ -9,10 +9,10 @@ if [ -z "$UNLEASH_API_TOKEN" ]; then
     echo "Warning: UNLEASH_API_TOKEN not set, using default demo token"
 fi
 
-# Build the project
+# Build the project using Maven Wrapper (works without Maven installed)
 echo "Building the project..."
-mvn clean compile
+./mvnw clean compile
 
 # Run the application
 echo "Starting Unleash Comparison App..."
-mvn exec:java -Dexec.mainClass="com.example.UnleashComparisonApp"
+./mvnw exec:java -Dexec.mainClass="com.example.UnleashComparisonApp"

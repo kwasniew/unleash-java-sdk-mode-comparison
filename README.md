@@ -37,7 +37,13 @@ If not set, the app will use the Unleash demo instance by default.
 ./run.sh
 ```
 
-### Using Maven directly:
+### Using Maven Wrapper (no Maven installation required):
+```bash
+./mvnw clean compile
+./mvnw exec:java -Dexec.mainClass="com.example.UnleashComparisonApp"
+```
+
+### Using Maven directly (if you have Maven installed):
 ```bash
 mvn clean compile
 mvn exec:java -Dexec.mainClass="com.example.UnleashComparisonApp"
@@ -73,5 +79,5 @@ The application provides:
 ## Requirements
 
 - Java 11 or higher
-- Maven 3.6 or higher
+- Maven 3.6 or higher (optional - Maven Wrapper included)
 - Network access to Unleash server
