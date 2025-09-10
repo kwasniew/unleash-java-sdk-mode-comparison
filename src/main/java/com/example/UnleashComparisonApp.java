@@ -15,6 +15,7 @@ import com.sun.net.httpserver.HttpExchange;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
@@ -34,6 +35,10 @@ public class UnleashComparisonApp {
     private static final AtomicLong mismatchCount = new AtomicLong(0);
     private static final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(2);
     private static volatile ScheduledFuture<?> pendingComparisonTask = null;
+    
+    // Memory monitoring
+    private static final Runtime runtime = Runtime.getRuntime();
+    private static long lastUsedMemory = 0;
     
     // Store latest comparison data for HTTP server
     private static volatile Map<String, Boolean> lastStreamingValues = new ConcurrentHashMap<>();
@@ -97,10 +102,11 @@ public class UnleashComparisonApp {
             String html = generateHTML();
             exchange.getResponseHeaders().set("Content-Type", "text/html; charset=UTF-8");
             exchange.getResponseHeaders().set("Refresh", "1"); // Auto-refresh every 1 second
-            exchange.sendResponseHeaders(200, html.getBytes().length);
+            byte[] bytes = html.getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, bytes.length);
             
             try (OutputStream os = exchange.getResponseBody()) {
-                os.write(html.getBytes());
+                os.write(bytes);
             }
         }
         
@@ -249,6 +255,10 @@ public class UnleashComparisonApp {
         scheduler.scheduleAtFixedRate(UnleashComparisonApp::compareClientsForDiscrepancies, 
             CHECK_INTERVAL_MS, CHECK_INTERVAL_MS, TimeUnit.MILLISECONDS);
         
+        // Start memory monitoring every 10 seconds
+        scheduler.scheduleAtFixedRate(UnleashComparisonApp::logMemoryUsage, 
+            10_000, 10_000, TimeUnit.MILLISECONDS);
+        
         // Keep the app running
         System.out.println("\nSoak test started. Press Ctrl+C to exit.\n");
         
@@ -319,6 +329,40 @@ public class UnleashComparisonApp {
         
         // Update discrepancies immediately for UI display
         lastDiscrepancies = new CopyOnWriteArrayList<>(currentDiscrepancies);
+    }
+    
+    private static void logMemoryUsage() {
+        long totalMemory = runtime.totalMemory();
+        long freeMemory = runtime.freeMemory();
+        long usedMemory = totalMemory - freeMemory;
+        long maxMemory = runtime.maxMemory();
+        
+        // Convert to MB
+        long usedMB = usedMemory / (1024 * 1024);
+        long totalMB = totalMemory / (1024 * 1024);
+        long maxMB = maxMemory / (1024 * 1024);
+        
+        // Calculate change from last check
+        long changeMemory = usedMemory - lastUsedMemory;
+        String changeStr;
+        if (changeMemory > 0) {
+            changeStr = String.format("📈 +%d MB", changeMemory / (1024 * 1024));
+        } else if (changeMemory < 0) {
+            changeStr = String.format("📉 %d MB", changeMemory / (1024 * 1024));
+        } else {
+            changeStr = "➡️ 0 MB";
+        }
+        
+        System.out.printf("[%s] 💾 Memory: %d/%d MB (max: %d MB) %s%n", 
+            LocalDateTime.now().format(TIME_FORMAT), usedMB, totalMB, maxMB, changeStr);
+        
+        lastUsedMemory = usedMemory;
+        
+        // Force GC if memory usage is high
+        if (usedMemory > maxMemory * 0.8) {
+            System.out.println("🚨 High memory usage detected, forcing GC...");
+            System.gc();
+        }
     }
     
     private static void compareClientsForDiscrepancies() {
