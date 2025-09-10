@@ -219,7 +219,7 @@ public class UnleashComparisonApp {
                 .instanceId("comparison-streaming-" + UUID.randomUUID())
                 .unleashAPI(apiUrl)
                 .customHttpHeader("Authorization", apiToken)
-//                .experimentalStreamingMode()
+               .experimentalStreamingMode()
                 .subscriber(new StreamingEventSubscriber())
                 .synchronousFetchOnInitialisation(true)
                 .build();
