@@ -33,6 +33,7 @@ public class UnleashComparisonApp {
     private static final AtomicLong comparisonCount = new AtomicLong(0);
     private static final AtomicLong mismatchCount = new AtomicLong(0);
     private static final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(2);
+    private static volatile ScheduledFuture<?> pendingComparisonTask = null;
     
     // Store latest comparison data for HTTP server
     private static volatile Map<String, Boolean> lastStreamingValues = new ConcurrentHashMap<>();
@@ -53,8 +54,17 @@ public class UnleashComparisonApp {
             // Update UI immediately for streaming side
             updateUIImmediate();
             
-            // Schedule a comparison after giving polling time to catch up for discrepancy tracking
-            scheduler.schedule(UnleashComparisonApp::compareClientsForDiscrepancies, COMPARISON_DELAY_MS, TimeUnit.MILLISECONDS);
+            // Cancel any existing pending comparison task to prevent task accumulation
+            if (pendingComparisonTask != null && !pendingComparisonTask.isDone()) {
+                pendingComparisonTask.cancel(false);
+            }
+            
+            // Schedule a new comparison after giving polling time to catch up
+            pendingComparisonTask = scheduler.schedule(
+                UnleashComparisonApp::compareClientsForDiscrepancies, 
+                COMPARISON_DELAY_MS, 
+                TimeUnit.MILLISECONDS
+            );
         }
 
         @Override
