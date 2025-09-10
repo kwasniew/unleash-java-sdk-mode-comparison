@@ -106,8 +106,8 @@ public class UnleashComparisonApp {
             html.append(".column { flex: 1; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }\n");
             html.append(".flag { padding: 8px; margin: 4px 0; border-radius: 4px; }\n");
             html.append(".enabled { background: #d4edda; color: #155724; }\n");
-            html.append(".disabled { background: #f8d7da; color: #721c24; }\n");
-            html.append(".mismatch { border: 2px solid #ff6b6b; background: #ffe0e0; }\n");
+            html.append(".disabled { background: #e2e3e5; color: #383d41; }\n");
+            html.append(".mismatch { border: 3px solid #dc3545; font-weight: bold; }\n");
             html.append(".stats { background: white; padding: 20px; margin-bottom: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }\n");
             html.append(".discrepancy { color: #d73027; font-weight: bold; }\n");
             html.append("</style>\n");
@@ -290,10 +290,25 @@ public class UnleashComparisonApp {
             pollingValues.put(toggle, pollingClient.isEnabled(toggle, pollingContext));
         }
         
-        // Update UI data immediately - keep existing discrepancies until they're properly re-evaluated
+        // Update UI data immediately and calculate current discrepancies
         lastStreamingValues = new ConcurrentHashMap<>(streamingValues);
         lastPollingValues = new ConcurrentHashMap<>(pollingValues);
-        // Don't clear lastDiscrepancies here - let them persist until the delayed comparison updates them
+        
+        // Calculate all current discrepancies immediately (for UI display)
+        List<String> currentDiscrepancies = new ArrayList<>();
+        for (String toggle : allToggles) {
+            boolean streamingEnabled = streamingValues.get(toggle);
+            boolean pollingEnabled = pollingValues.get(toggle);
+            
+            if (streamingEnabled != pollingEnabled) {
+                String discrepancy = String.format("Toggle '%s': streaming=%s, polling=%s", 
+                    toggle, streamingEnabled, pollingEnabled);
+                currentDiscrepancies.add(discrepancy);
+            }
+        }
+        
+        // Update discrepancies immediately for UI display
+        lastDiscrepancies = new CopyOnWriteArrayList<>(currentDiscrepancies);
     }
     
     private static void compareClientsForDiscrepancies() {
