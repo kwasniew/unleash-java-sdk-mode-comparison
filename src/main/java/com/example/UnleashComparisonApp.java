@@ -22,6 +22,7 @@ import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.lang.ref.WeakReference;
 
 public class UnleashComparisonApp {
     private static final DateTimeFormatter TIME_FORMAT = DateTimeFormatter.ofPattern("HH:mm:ss.SSS");
@@ -47,8 +48,13 @@ public class UnleashComparisonApp {
     private static volatile List<String> lastDiscrepancies = new CopyOnWriteArrayList<>();
     
     // Track persistent discrepancies (only count those lasting longer than refresh interval)
+    // Use bounded map to prevent unbounded growth
+    private static final int MAX_DISCREPANCY_ENTRIES = 1000;
     private static final Map<String, Long> discrepancyTimestamps = new ConcurrentHashMap<>();
     private static final long DISCREPANCY_THRESHOLD_MS = POLLING_INTERVAL_MS + 2000; // Wait longer than polling interval
+    
+    // Bounded HTTP executor to prevent thread accumulation
+    private static final ExecutorService httpExecutor = Executors.newFixedThreadPool(10);
     
     private static class StreamingEventSubscriber implements UnleashSubscriber {
         @Override
@@ -61,7 +67,7 @@ public class UnleashComparisonApp {
             
             // Cancel any existing pending comparison task to prevent task accumulation
             if (pendingComparisonTask != null && !pendingComparisonTask.isDone()) {
-                pendingComparisonTask.cancel(false);
+                pendingComparisonTask.cancel(true); // Use true to interrupt if running
             }
             
             // Schedule a new comparison after giving polling time to catch up
@@ -239,7 +245,7 @@ public class UnleashComparisonApp {
         try {
             HttpServer server = HttpServer.create(new InetSocketAddress(8080), 0);
             server.createContext("/", new ComparisonHttpHandler());
-            server.setExecutor(null); // Use default executor
+            server.setExecutor(httpExecutor); // Use bounded executor
             server.start();
             System.out.println("HTTP server started on http://localhost:8080");
             System.out.println("Open your browser to view the comparison dashboard");
@@ -265,8 +271,19 @@ public class UnleashComparisonApp {
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             System.out.println("\nShutting down...");
             scheduler.shutdown();
+            httpExecutor.shutdown();
             streamingClient.shutdown();
             pollingClient.shutdown();
+            try {
+                if (!scheduler.awaitTermination(5, TimeUnit.SECONDS)) {
+                    scheduler.shutdownNow();
+                }
+                if (!httpExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
+                    httpExecutor.shutdownNow();
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
         }));
         
         try {
@@ -311,8 +328,13 @@ public class UnleashComparisonApp {
         }
         
         // Update UI data immediately and calculate current discrepancies
-        lastStreamingValues = new ConcurrentHashMap<>(streamingValues);
-        lastPollingValues = new ConcurrentHashMap<>(pollingValues);
+        // Only copy if values actually changed to reduce memory churn
+        if (!streamingValues.equals(lastStreamingValues)) {
+            lastStreamingValues = new ConcurrentHashMap<>(streamingValues);
+        }
+        if (!pollingValues.equals(lastPollingValues)) {
+            lastPollingValues = new ConcurrentHashMap<>(pollingValues);
+        }
         
         // Calculate all current discrepancies immediately (for UI display)
         List<String> currentDiscrepancies = new ArrayList<>();
@@ -449,8 +471,13 @@ public class UnleashComparisonApp {
             pollingValues.put(toggle, pollingClient.isEnabled(toggle, pollingContext));
         }
         
-        lastStreamingValues = new ConcurrentHashMap<>(streamingValues);
-        lastPollingValues = new ConcurrentHashMap<>(pollingValues);
+        // Only update if values changed to reduce memory churn
+        if (!streamingValues.equals(lastStreamingValues)) {
+            lastStreamingValues = new ConcurrentHashMap<>(streamingValues);
+        }
+        if (!pollingValues.equals(lastPollingValues)) {
+            lastPollingValues = new ConcurrentHashMap<>(pollingValues);
+        }
         lastDiscrepancies = new CopyOnWriteArrayList<>(currentDiscrepancies);
         lastComparisonTime = timestamp;
         
@@ -466,13 +493,30 @@ public class UnleashComparisonApp {
             System.out.println("✅ No persistent discrepancies detected!");
         }
         
-        // Clean up old discrepancy timestamps
+        // Clean up old discrepancy timestamps and enforce size limit
         discrepancyTimestamps.entrySet().removeIf(entry -> 
             currentTime - entry.getValue() > DISCREPANCY_THRESHOLD_MS * 2);
+        
+        // Enforce max size limit to prevent unbounded growth
+        if (discrepancyTimestamps.size() > MAX_DISCREPANCY_ENTRIES) {
+            // Remove oldest entries if we exceed the limit
+            List<Map.Entry<String, Long>> entries = new ArrayList<>(discrepancyTimestamps.entrySet());
+            entries.sort(Map.Entry.comparingByValue()); // Sort by timestamp (oldest first)
+            int toRemove = discrepancyTimestamps.size() - MAX_DISCREPANCY_ENTRIES + 100; // Remove extra to avoid frequent cleanup
+            for (int i = 0; i < toRemove && i < entries.size(); i++) {
+                discrepancyTimestamps.remove(entries.get(i).getKey());
+            }
+            System.out.println("⚠️ Discrepancy map exceeded size limit, removed " + toRemove + " oldest entries");
+        }
     }
     
     private static boolean isPersistentDiscrepancy(String key, String discrepancy, long currentTime) {
         if (!discrepancyTimestamps.containsKey(key)) {
+            // Check size limit before adding new entries
+            if (discrepancyTimestamps.size() >= MAX_DISCREPANCY_ENTRIES) {
+                System.out.println("⚠️ Discrepancy tracking map at capacity, skipping new discrepancy: " + key);
+                return false;
+            }
             // First time seeing this discrepancy
             discrepancyTimestamps.put(key, currentTime);
             System.out.println("New discrepancy detected (waiting for persistence): " + discrepancy);
