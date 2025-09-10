@@ -290,11 +290,10 @@ public class UnleashComparisonApp {
             pollingValues.put(toggle, pollingClient.isEnabled(toggle, pollingContext));
         }
         
-        // Update UI data immediately (don't count discrepancies yet)
+        // Update UI data immediately - keep existing discrepancies until they're properly re-evaluated
         lastStreamingValues = new ConcurrentHashMap<>(streamingValues);
         lastPollingValues = new ConcurrentHashMap<>(pollingValues);
-        // Clear discrepancies for immediate UI update - they'll be recalculated in delayed comparison
-        lastDiscrepancies = new CopyOnWriteArrayList<>();
+        // Don't clear lastDiscrepancies here - let them persist until the delayed comparison updates them
     }
     
     private static void compareClientsForDiscrepancies() {
