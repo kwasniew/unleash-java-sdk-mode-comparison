@@ -37,15 +37,28 @@ public class UnleashComparisonApp {
     private static final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(2);
     private static volatile ScheduledFuture<?> pendingComparisonTask = null;
     
+    // Reusable context objects to avoid creating new ones on every update
+    private static final UnleashContext STREAMING_CONTEXT = UnleashContext.builder()
+            .userId("comparison-test-user-123")
+            .sessionId("comparison-session-456")
+            .addProperty("mode", "streaming")
+            .build();
+    
+    private static final UnleashContext POLLING_CONTEXT = UnleashContext.builder()
+            .userId("comparison-test-user-123")
+            .sessionId("comparison-session-456")
+            .addProperty("mode", "polling")
+            .build();
+    
     // Memory monitoring
     private static final Runtime runtime = Runtime.getRuntime();
     private static long lastUsedMemory = 0;
     
-    // Store latest comparison data for HTTP server
-    private static volatile Map<String, Boolean> lastStreamingValues = new ConcurrentHashMap<>();
-    private static volatile Map<String, Boolean> lastPollingValues = new ConcurrentHashMap<>();
+    // Store latest comparison data for HTTP server - use final collections to avoid recreating
+    private static final Map<String, Boolean> lastStreamingValues = new ConcurrentHashMap<>();
+    private static final Map<String, Boolean> lastPollingValues = new ConcurrentHashMap<>();
     private static volatile String lastComparisonTime = "";
-    private static volatile List<String> lastDiscrepancies = new CopyOnWriteArrayList<>();
+    private static final List<String> lastDiscrepancies = new CopyOnWriteArrayList<>();
     
     // Track persistent discrepancies (only count those lasting longer than refresh interval)
     // Use bounded map to prevent unbounded growth
@@ -299,58 +312,49 @@ public class UnleashComparisonApp {
         String timestamp = LocalDateTime.now().format(TIME_FORMAT);
         lastComparisonTime = timestamp;
         
-        UnleashContext streamingContext = UnleashContext.builder()
-                .userId("comparison-test-user-123")
-                .sessionId("comparison-session-456")
-                .addProperty("mode", "streaming")
-                .build();
-        
-        UnleashContext pollingContext = UnleashContext.builder()
-                .userId("comparison-test-user-123")
-                .sessionId("comparison-session-456")
-                .addProperty("mode", "polling")
-                .build();
+        // Use pre-created contexts to avoid allocations
         
         // Get current values from both clients
         List<String> streamingToggles = streamingClient.more().getFeatureToggleNames();
         List<String> pollingToggles = pollingClient.more().getFeatureToggleNames();
         
-        Set<String> allToggles = new HashSet<>();
-        allToggles.addAll(streamingToggles);
+        // Reuse a set by clearing it instead of creating new one
+        Set<String> allToggles = new HashSet<>(streamingToggles);
         allToggles.addAll(pollingToggles);
         
-        Map<String, Boolean> streamingValues = new HashMap<>();
-        Map<String, Boolean> pollingValues = new HashMap<>();
-        
-        for (String toggle : allToggles) {
-            streamingValues.put(toggle, streamingClient.isEnabled(toggle, streamingContext));
-            pollingValues.put(toggle, pollingClient.isEnabled(toggle, pollingContext));
-        }
-        
-        // Update UI data immediately and calculate current discrepancies
-        // Only copy if values actually changed to reduce memory churn
-        if (!streamingValues.equals(lastStreamingValues)) {
-            lastStreamingValues = new ConcurrentHashMap<>(streamingValues);
-        }
-        if (!pollingValues.equals(lastPollingValues)) {
-            lastPollingValues = new ConcurrentHashMap<>(pollingValues);
-        }
-        
-        // Calculate all current discrepancies immediately (for UI display)
-        List<String> currentDiscrepancies = new ArrayList<>();
-        for (String toggle : allToggles) {
-            boolean streamingEnabled = streamingValues.get(toggle);
-            boolean pollingEnabled = pollingValues.get(toggle);
-            
-            if (streamingEnabled != pollingEnabled) {
-                String discrepancy = String.format("Toggle '%s': streaming=%s, polling=%s", 
-                    toggle, streamingEnabled, pollingEnabled);
-                currentDiscrepancies.add(discrepancy);
+        // Clear and reuse the maps instead of creating new ones
+        synchronized (lastStreamingValues) {
+            lastStreamingValues.clear();
+            for (String toggle : allToggles) {
+                lastStreamingValues.put(toggle, streamingClient.isEnabled(toggle, STREAMING_CONTEXT));
             }
         }
         
-        // Update discrepancies immediately for UI display
-        lastDiscrepancies = new CopyOnWriteArrayList<>(currentDiscrepancies);
+        synchronized (lastPollingValues) {
+            lastPollingValues.clear();
+            for (String toggle : allToggles) {
+                lastPollingValues.put(toggle, pollingClient.isEnabled(toggle, POLLING_CONTEXT));
+            }
+        }
+        
+        // Calculate discrepancies and update the list
+        synchronized (lastDiscrepancies) {
+            lastDiscrepancies.clear();
+            for (String toggle : allToggles) {
+                Boolean streamingEnabled = lastStreamingValues.get(toggle);
+                Boolean pollingEnabled = lastPollingValues.get(toggle);
+                
+                if (streamingEnabled != null && pollingEnabled != null && 
+                    !streamingEnabled.equals(pollingEnabled)) {
+                    // Use StringBuilder for efficient string construction
+                    StringBuilder sb = new StringBuilder(64);
+                    sb.append("Toggle '").append(toggle)
+                      .append("': streaming=").append(streamingEnabled)
+                      .append(", polling=").append(pollingEnabled);
+                    lastDiscrepancies.add(sb.toString());
+                }
+            }
+        }
     }
     
     private static void logMemoryUsage() {
@@ -392,23 +396,12 @@ public class UnleashComparisonApp {
         String timestamp = LocalDateTime.now().format(TIME_FORMAT);
         System.out.println("\n[" + timestamp + "] === Checking for persistent discrepancies ===");
         
-        UnleashContext streamingContext = UnleashContext.builder()
-                .userId("comparison-test-user-123")
-                .sessionId("comparison-session-456")
-                .addProperty("mode", "streaming")
-                .build();
-        
-        UnleashContext pollingContext = UnleashContext.builder()
-                .userId("comparison-test-user-123")
-                .sessionId("comparison-session-456")
-                .addProperty("mode", "polling")
-                .build();
+        // Use pre-created contexts to avoid allocations
         
         List<String> streamingToggles = streamingClient.more().getFeatureToggleNames();
         List<String> pollingToggles = pollingClient.more().getFeatureToggleNames();
         
-        Set<String> allToggles = new HashSet<>();
-        allToggles.addAll(streamingToggles);
+        Set<String> allToggles = new HashSet<>(streamingToggles);
         allToggles.addAll(pollingToggles);
         
         System.out.println("Total feature toggles: " + allToggles.size());
@@ -416,7 +409,7 @@ public class UnleashComparisonApp {
         System.out.println("Polling toggles: " + pollingToggles.size());
         
         boolean hasDiscrepancies = false;
-        List<String> currentDiscrepancies = new ArrayList<>();
+        List<String> currentDiscrepancies = new ArrayList<>(8); // Pre-size for typical case
         long currentTime = System.currentTimeMillis();
         
         // Compare toggle lists
@@ -447,12 +440,17 @@ public class UnleashComparisonApp {
         
         // Compare isEnabled values and track persistent discrepancies
         for (String toggle : allToggles) {
-            boolean streamingEnabled = streamingClient.isEnabled(toggle, streamingContext);
-            boolean pollingEnabled = pollingClient.isEnabled(toggle, pollingContext);
+            boolean streamingEnabled = streamingClient.isEnabled(toggle, STREAMING_CONTEXT);
+            boolean pollingEnabled = pollingClient.isEnabled(toggle, POLLING_CONTEXT);
             
             if (streamingEnabled != pollingEnabled) {
-                String discrepancy = String.format("Toggle '%s': streaming=%s, polling=%s", 
-                    toggle, streamingEnabled, pollingEnabled);
+                // Use StringBuilder for efficient string construction
+                StringBuilder sb = new StringBuilder(64);
+                sb.append("Toggle '").append(toggle)
+                  .append("': streaming=").append(streamingEnabled)
+                  .append(", polling=").append(pollingEnabled);
+                String discrepancy = sb.toString();
+                
                 if (isPersistentDiscrepancy(toggle, discrepancy, currentTime)) {
                     hasDiscrepancies = true;
                     currentDiscrepancies.add(discrepancy);
@@ -464,21 +462,24 @@ public class UnleashComparisonApp {
         }
         
         // Update UI with current values and persistent discrepancies only
-        Map<String, Boolean> streamingValues = new HashMap<>();
-        Map<String, Boolean> pollingValues = new HashMap<>();
-        for (String toggle : allToggles) {
-            streamingValues.put(toggle, streamingClient.isEnabled(toggle, streamingContext));
-            pollingValues.put(toggle, pollingClient.isEnabled(toggle, pollingContext));
+        synchronized (lastStreamingValues) {
+            lastStreamingValues.clear();
+            for (String toggle : allToggles) {
+                lastStreamingValues.put(toggle, streamingClient.isEnabled(toggle, STREAMING_CONTEXT));
+            }
         }
         
-        // Only update if values changed to reduce memory churn
-        if (!streamingValues.equals(lastStreamingValues)) {
-            lastStreamingValues = new ConcurrentHashMap<>(streamingValues);
+        synchronized (lastPollingValues) {
+            lastPollingValues.clear();
+            for (String toggle : allToggles) {
+                lastPollingValues.put(toggle, pollingClient.isEnabled(toggle, POLLING_CONTEXT));
+            }
         }
-        if (!pollingValues.equals(lastPollingValues)) {
-            lastPollingValues = new ConcurrentHashMap<>(pollingValues);
+        
+        synchronized (lastDiscrepancies) {
+            lastDiscrepancies.clear();
+            lastDiscrepancies.addAll(currentDiscrepancies);
         }
-        lastDiscrepancies = new CopyOnWriteArrayList<>(currentDiscrepancies);
         lastComparisonTime = timestamp;
         
         comparisonCount.incrementAndGet();
